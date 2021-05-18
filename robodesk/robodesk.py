@@ -111,7 +111,7 @@ class RoboDesk(gym.Env):
         'qvel_objects': gym.spaces.Box(-np.inf, np.inf, (26,), np.float32)}
     return gym.spaces.Dict(spaces)
 
-  def render(self, mode='rgb_array', resize=True):
+  def render(self, mode='rgb_array', resize=True, depth=False, segmentation=False):
     params = {'distance': 1.8, 'azimuth': 90, 'elevation': -60,
               'crop_box': (16.75, 25.0, 105.0, 88.75), 'size': 120}
     camera = mujoco.Camera(
@@ -122,7 +122,17 @@ class RoboDesk(gym.Env):
     camera._render_camera.elevation = params['elevation']  # pylint: disable=protected-access
     camera._render_camera.lookat[:] = [0, 0.535, 1.1]  # pylint: disable=protected-access
 
-    image = camera.render(depth=False, segmentation=False)
+    image = camera.render()
+
+    if depth:
+        depth_map = camera.render(depth=True)
+    else:
+        depth_map = np.zeros((image.shape[0], image.shape[1]))
+    if segmentation:
+        seg_map = camera.render(segmentation=True)
+    else:
+        seg_map = np.zeros((image.shape[0], image.shape[1], 2))
+
     camera._scene.free()  # pylint: disable=protected-access
 
     if resize:
@@ -130,7 +140,14 @@ class RoboDesk(gym.Env):
       image = image.resize([self.image_size, self.image_size],
                            resample=Image.ANTIALIAS)
       image = np.asarray(image)
-    return image
+
+      left, upper, right, lower = list(map(round, params['crop_box']))
+      depth_map = depth_map[upper:lower, left:right]
+      seg_map = seg_map[upper:lower, left:right]
+      s1, s2 = (depth_map.shape[0] // self.image_size, depth_map.shape[1] // self.image_size)
+      seg_map = seg_map[::s1, ::s2, :]
+      depth_map = depth_map[::s1, ::s2]
+    return image, depth_map, seg_map
 
   def _ik(self, pos):
     out = inverse_kinematics.qpos_from_site_pose(
@@ -165,7 +182,7 @@ class RoboDesk(gym.Env):
     joint[8] = joint[7]
     return joint
 
-  def step(self, action):
+  def step(self, action, depth=False, segmentation=False):
     total_reward = 0
     for _ in range(self.action_repeat):
       joint_position = self._convert_action(action)
@@ -194,7 +211,7 @@ class RoboDesk(gym.Env):
       done = True
     else:
       done = False
-    return self._get_obs(), total_reward, done, {'discount': 1.0}
+    return self._get_obs(depth=depth, segmentation=segmentation), total_reward, done, {'discount': 1.0}
 
   def _get_init_robot_pos(self):
     init_joint_pose = np.array(
@@ -204,7 +221,7 @@ class RoboDesk(gym.Env):
         high=self.physics.model.actuator_ctrlrange[:self.num_joints, 1])
     return init_joint_pose
 
-  def reset(self):
+  def reset(self, depth=False, segmentation=False):
     """Resets environment."""
     self.success = False
     self.num_steps = 0
@@ -239,7 +256,7 @@ class RoboDesk(gym.Env):
     self.original_pos['flat_block'] = self.physics.named.data.xpos['flat_block']
 
     self.drawer_opened = False
-    return self._get_obs()
+    return self._get_obs(depth=depth, segmentation=segmentation)
 
   def _did_not_move(self, block_name):
     current_pos = self.physics.named.data.xpos[block_name]
@@ -377,8 +394,8 @@ class RoboDesk(gym.Env):
     reward = max(0, min(1, reward))
     return reward
 
-  def _get_obs(self):
-    return {'image': self.render(resize=True),
+  def _get_obs(self, depth=False, segmentation=False):
+    return {'image': self.render(resize=True, depth=depth, segmentation=segmentation),
             'qpos_robot': self.physics.data.qpos[:self.num_joints].copy(),
             'qvel_robot': self.physics.data.qvel[:self.num_joints].copy(),
             'end_effector': self.physics.named.data.site_xpos['end_effector'],
